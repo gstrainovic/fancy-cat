@@ -15,6 +15,7 @@ pub const KeyMap = struct {
     colorize: vaxis.Key = .{ .codepoint = 'z' },
     quit: vaxis.Key = .{ .codepoint = 'c', .mods = .{ .ctrl = true } },
     full_screen: vaxis.Key = .{ .codepoint = 'f' },
+    toggle_scroll_mode: vaxis.Key = .{ .codepoint = 's' },
     enter_command_mode: vaxis.Key = .{ .codepoint = ':' },
     exit_command_mode: vaxis.Key = .{ .codepoint = vaxis.Key.escape },
     execute_command: vaxis.Key = .{ .codepoint = vaxis.Key.enter },

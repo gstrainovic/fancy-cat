@@ -47,6 +47,9 @@ pub const Context = struct {
     current_reload_indicator_state: ReloadIndicatorState,
     reload_indicator_active: bool,
     buf: []u8,
+    scroll_mode: bool,
+    scroll_offset: i32, // Global scroll position in terminal rows (for scroll mode)
+    page_height: u16, // Height of a page in terminal rows (for scroll mode calculations)
 
     pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !Self {
         const path = args[1];
@@ -97,6 +100,9 @@ pub const Context = struct {
             .current_reload_indicator_state = .idle,
             .reload_indicator_active = false,
             .buf = buf,
+            .scroll_mode = false,
+            .scroll_offset = 0,
+            .page_height = 0,
         };
     }
 
@@ -289,6 +295,14 @@ pub const Context = struct {
     }
 
     pub fn drawCurrentPage(self: *Self, win: vaxis.Window) !void {
+        if (self.scroll_mode) {
+            try self.drawScrollMode(win);
+        } else {
+            try self.drawNormalMode(win);
+        }
+    }
+
+    fn drawNormalMode(self: *Self, win: vaxis.Window) !void {
         if (self.reload_page) {
             const winsize = try vaxis.Tty.getWinsize(self.tty.fd);
             const pix_per_col = try std.math.divCeil(u16, win.screen.width_pix, win.screen.width);
@@ -325,6 +339,116 @@ pub const Context = struct {
             });
             try img.draw(center, .{ .scale = .contain });
         }
+    }
+
+    fn drawScrollMode(self: *Self, win: vaxis.Window) !void {
+        const pix_per_col = try std.math.divCeil(u16, win.screen.width_pix, win.screen.width);
+        const pix_per_row = try std.math.divCeil(u16, win.screen.height_pix, win.screen.height);
+        const x_pix: u32 = @as(u32, win.width) * @as(u32, pix_per_col);
+
+        // Calculate viewport height in terminal rows (area above status bar)
+        var viewport_height: usize = win.height;
+        if (self.config.status_bar.enabled) {
+            viewport_height -|= 2;
+        }
+
+        // For scroll mode, render pages to fit viewport width, with height based on aspect ratio
+        // Use viewport pixel dimensions for rendering
+        const viewport_y_pix: u32 = @intCast(viewport_height * pix_per_row);
+
+        const total_pages = self.document_handler.getTotalPages();
+        const gap: i32 = 1; // Gap between pages in terminal rows
+
+        // Render the first page to get dimensions (used for all pages for simplicity)
+        // Use a large height so pages aren't height-constrained
+        const first_page = try self.getPage(0, x_pix, viewport_y_pix * 10);
+        const page_dims = try first_page.cellSize(win);
+        self.page_height = @intCast(page_dims.rows);
+
+        const page_height_i32: i32 = @intCast(self.page_height);
+        const page_total_height: i32 = page_height_i32 + gap;
+        const viewport_height_i32: i32 = @intCast(viewport_height);
+
+        // Total height of all pages with gaps
+        const total_height: i32 = @as(i32, @intCast(total_pages)) * page_total_height - gap;
+
+        // Clamp scroll offset
+        const max_scroll = @max(0, total_height - viewport_height_i32);
+        self.scroll_offset = std.math.clamp(self.scroll_offset, 0, max_scroll);
+
+        // Track which page has most visibility for status bar
+        var most_visible_page: u16 = 0;
+        var most_visible_rows: i32 = 0;
+
+        // Iterate through all pages and draw visible ones
+        var page_num: u16 = 0;
+        while (page_num < total_pages) : (page_num += 1) {
+            // Position of this page's top in the document
+            const page_top: i32 = @as(i32, @intCast(page_num)) * page_total_height;
+            const page_bottom: i32 = page_top + page_height_i32;
+
+            // Position relative to viewport (where should this page appear on screen)
+            const rel_top: i32 = page_top - self.scroll_offset;
+            const rel_bottom: i32 = page_bottom - self.scroll_offset;
+
+            // Check if page is visible in viewport
+            if (rel_bottom <= 0 or rel_top >= viewport_height_i32) {
+                continue; // Page not visible
+            }
+
+            // Calculate how many rows of this page are visible
+            const visible_top = @max(0, rel_top);
+            const visible_bottom = @min(viewport_height_i32, rel_bottom);
+            const visible_rows = visible_bottom - visible_top;
+
+            if (visible_rows > most_visible_rows) {
+                most_visible_rows = visible_rows;
+                most_visible_page = page_num;
+            }
+
+            // Render this page
+            const img = try self.getPage(page_num, x_pix, viewport_y_pix * 10);
+            const dims = try img.cellSize(win);
+            const x_off: usize = (win.width -| dims.cols) / 2;
+
+            // Calculate clipping for both top and bottom
+            const clip_top: u16 = if (rel_top < 0) @intCast(-rel_top) else 0;
+            const clip_bottom: u16 = if (rel_bottom > viewport_height_i32)
+                @intCast(rel_bottom - viewport_height_i32)
+            else
+                0;
+
+            const draw_y: usize = if (rel_top < 0) 0 else @intCast(rel_top);
+            const draw_height: usize = @intCast(@max(0, page_height_i32 - @as(i32, clip_top) - @as(i32, clip_bottom)));
+
+            if (draw_height > 0) {
+                const page_win = win.child(.{
+                    .x_off = @intCast(x_off),
+                    .y_off = @intCast(draw_y),
+                    .width = @intCast(dims.cols),
+                    .height = @intCast(draw_height),
+                });
+
+                const pixels_from_top: u16 = clip_top * pix_per_row;
+                const visible_pixel_height: u16 = @intCast(draw_height * pix_per_row);
+
+                try img.draw(page_win, .{
+                    .scale = .none,
+                    .z_index = -1,
+                    .clip_region = .{
+                        .x = 0,
+                        .y = pixels_from_top,
+                        .width = null,
+                        .height = visible_pixel_height,
+                    },
+                });
+            }
+        }
+
+        // Update current page number to the page with most visibility
+        self.document_handler.current_page_number = most_visible_page;
+
+        self.reload_page = false;
     }
 
     pub fn drawStatusBar(self: *Self, win: vaxis.Window) !void {
@@ -484,5 +608,24 @@ pub const Context = struct {
 
     pub fn toggleFullScreen(self: *Self) void {
         self.config.status_bar.enabled = !self.config.status_bar.enabled;
+    }
+
+    pub fn toggleScrollMode(self: *Self) void {
+        self.scroll_mode = !self.scroll_mode;
+        if (self.scroll_mode) {
+            // Initialize scroll offset based on current page
+            const gap: i32 = 1;
+            const page_total_height: i32 = @as(i32, @intCast(self.page_height)) + gap;
+            self.scroll_offset = @as(i32, @intCast(self.document_handler.current_page_number)) * page_total_height;
+        } else {
+            self.scroll_offset = 0;
+        }
+    }
+
+    pub fn scrollInScrollMode(self: *Self, delta: i32) void {
+        // Scroll by a number of terminal rows
+        const scroll_amount: i32 = 3; // Rows to scroll per keypress
+        self.scroll_offset += delta * scroll_amount;
+        // Clamping is done in drawScrollMode
     }
 };

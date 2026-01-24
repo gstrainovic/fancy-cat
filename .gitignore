@@ -29,3 +29,4 @@ lima.yaml
 .vscode
 *.log
 *.epub
+.claude

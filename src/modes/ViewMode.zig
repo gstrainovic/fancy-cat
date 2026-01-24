@@ -91,7 +91,11 @@ pub fn handleKeyStroke(self: *Self, key: vaxis.Key, km: Config.KeyMap) !void {
             .mods = km.scroll_up.mods,
             .handler = struct {
                 fn action(s: *Context) void {
-                    s.document_handler.scroll(.Up);
+                    if (s.scroll_mode) {
+                        s.scrollInScrollMode(-1);
+                    } else {
+                        s.document_handler.scroll(.Up);
+                    }
                     s.reload_page = true;
                 }
             }.action,
@@ -101,7 +105,11 @@ pub fn handleKeyStroke(self: *Self, key: vaxis.Key, km: Config.KeyMap) !void {
             .mods = km.scroll_down.mods,
             .handler = struct {
                 fn action(s: *Context) void {
-                    s.document_handler.scroll(.Down);
+                    if (s.scroll_mode) {
+                        s.scrollInScrollMode(1);
+                    } else {
+                        s.document_handler.scroll(.Down);
+                    }
                     s.reload_page = true;
                 }
             }.action,
@@ -132,6 +140,16 @@ pub fn handleKeyStroke(self: *Self, key: vaxis.Key, km: Config.KeyMap) !void {
             .handler = struct {
                 fn action(s: *Context) void {
                     s.document_handler.toggleColor();
+                    s.reload_page = true;
+                }
+            }.action,
+        },
+        .{
+            .codepoint = km.toggle_scroll_mode.codepoint,
+            .mods = km.toggle_scroll_mode.mods,
+            .handler = struct {
+                fn action(s: *Context) void {
+                    s.toggleScrollMode();
                     s.reload_page = true;
                 }
             }.action,
